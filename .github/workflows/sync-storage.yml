@@ -1,0 +1,58 @@
+name: Storage A → B 同期 (synctest/)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run（実際には転送しない・事前確認用）'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: AzCopy インストール
+        run: |
+          curl -sL https://aka.ms/downloadazcopy-v10-linux -o azcopy.tar.gz
+          tar -xzf azcopy.tar.gz
+          sudo cp ./azcopy_linux_amd64_*/azcopy /usr/local/bin/
+          azcopy --version
+
+      - name: Storage A → B 同期実行
+        env:
+          # AzCopy に Service Principal 認証情報を渡す
+          AZCOPY_AUTO_LOGIN_TYPE: SPN
+          AZCOPY_SPA_APPLICATION_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZCOPY_SPA_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZCOPY_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          SOURCE="https://${{ secrets.SOURCE_STORAGE_ACCOUNT }}.blob.core.windows.net/${{ secrets.SOURCE_CONTAINER }}/synctest/"
+          DEST="https://${{ secrets.DEST_STORAGE_ACCOUNT }}.blob.core.windows.net/${{ secrets.DEST_CONTAINER }}/synctest/"
+
+          echo "同期元: $SOURCE"
+          echo "同期先: $DEST"
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "=== Dry Run モード（実際には転送しません） ==="
+            azcopy sync "$SOURCE" "$DEST" \
+              --delete-destination=true \
+              --dry-run
+          else
+            echo "=== 同期実行 ==="
+            azcopy sync "$SOURCE" "$DEST" \
+              --delete-destination=true
+          fi
+
+      - name: 実行サマリー
+        if: always()
+        run: |
+          echo "### 同期結果" >> $GITHUB_STEP_SUMMARY
+          echo "| 項目 | 値 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期元 | ${{ secrets.SOURCE_STORAGE_ACCOUNT }} / ${{ secrets.SOURCE_CONTAINER }} / synctest/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期先 | ${{ secrets.DEST_STORAGE_ACCOUNT }} / ${{ secrets.DEST_CONTAINER }} / synctest/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 実行日時 | $(date '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
