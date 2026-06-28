@@ -1,0 +1,66 @@
+name: GitHub /data → Alibaba Cloud OSS 同期
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run（実際には転送しない・事前確認用）'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: ossutil インストール
+        run: |
+          curl -o ossutil https://gosspublic.alicdn.com/ossutil/1.7.15/ossutil64
+          chmod +x ossutil
+          sudo mv ossutil /usr/local/bin/
+          ossutil version
+
+      - name: GitHub /data → OSS 同期実行
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ACCESS_KEY_SECRET }}
+        run: |
+          SOURCE="$GITHUB_WORKSPACE/data/"
+          DEST="oss://${{ secrets.OSS_BUCKET }}/data/"
+
+          echo "同期元: $SOURCE"
+          echo "同期先: $DEST"
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "=== Dry Run モード（実際には転送しません） ==="
+            # ossutil に dry-run オプションはないため、リスト表示で代替確認
+            ossutil ls "$DEST" \
+              --endpoint ${{ secrets.OSS_ENDPOINT }} \
+              --access-key-id $OSS_ACCESS_KEY_ID \
+              --access-key-secret $OSS_ACCESS_KEY_SECRET
+            echo "--- 同期元ファイル一覧 ---"
+            find "$SOURCE" -type f
+          else
+            echo "=== 同期実行 ==="
+            ossutil sync "$SOURCE" "$DEST" \
+              --endpoint ${{ secrets.OSS_ENDPOINT }} \
+              --access-key-id $OSS_ACCESS_KEY_ID \
+              --access-key-secret $OSS_ACCESS_KEY_SECRET \
+              --delete \
+              --force
+          fi
+
+      - name: 実行サマリー
+        if: always()
+        run: |
+          echo "### 同期結果" >> $GITHUB_STEP_SUMMARY
+          echo "| 項目 | 値 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期元 | GitHub リポジトリ /data/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期先 | oss://${{ secrets.OSS_BUCKET }}/data/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 実行日時 | $(date '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
