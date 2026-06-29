@@ -19,11 +19,13 @@ jobs:
 
       - name: ossutil インストール
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/aliyun/ossutil/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          # バージョン番号だけGitHub APIで取得（v プレフィックスを除去）
+          LATEST=$(curl -s https://api.github.com/repos/aliyun/ossutil/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
           echo "インストールするバージョン: $LATEST"
-          curl -L -o ossutil.tar.gz "https://github.com/aliyun/ossutil/releases/download/${LATEST}/ossutil-${LATEST}-linux-amd64.tar.gz"
-          tar -xzf ossutil.tar.gz
-          sudo mv ossutil-*-linux-amd64/ossutil /usr/local/bin/
+          # バイナリはAlibaba CDNからダウンロード
+          curl -o ossutil "https://gosspublic.alicdn.com/ossutil/${LATEST}/ossutil64"
+          chmod +x ossutil
+          sudo mv ossutil /usr/local/bin/
           ossutil --version
 
       - name: GitHub /data → OSS 同期実行
