@@ -9,6 +9,9 @@ on:
         default: 'false'
         type: boolean
 
+env:
+  OSSUTIL_VERSION: "1.7.15"  # 更新時はここだけ変更する
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -19,11 +22,8 @@ jobs:
 
       - name: ossutil インストール
         run: |
-          # バージョン番号だけGitHub APIで取得（v プレフィックスを除去）
-          LATEST=$(curl -s https://api.github.com/repos/aliyun/ossutil/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
-          echo "インストールするバージョン: $LATEST"
-          # バイナリはAlibaba CDNからダウンロード
-          curl -o ossutil "https://gosspublic.alicdn.com/ossutil/${LATEST}/ossutil64"
+          echo "インストールするバージョン: ${{ env.OSSUTIL_VERSION }}"
+          curl -o ossutil "https://gosspublic.alicdn.com/ossutil/${{ env.OSSUTIL_VERSION }}/ossutil64"
           chmod +x ossutil
           sudo mv ossutil /usr/local/bin/
           ossutil --version
