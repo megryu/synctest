@@ -1,0 +1,191 @@
+name: GitHub /data → OSS 差分同期
+
+on:
+  workflow_dispatch:
+
+env:
+  OSSUTIL_VERSION: "1.7.15"  # 更新時はここだけ変更する
+  DATA_PATH: "data"           # 同期対象のGitHubディレクトリ
+  OSS_PREFIX: "data/"         # 同期対象のOSSプレフィックス
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: 開始時刻記録
+        id: start_time
+        run: echo "start=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: ossutil インストール
+        run: |
+          curl -o ossutil "https://gosspublic.alicdn.com/ossutil/${{ env.OSSUTIL_VERSION }}/ossutil64"
+          chmod +x ossutil
+          sudo mv ossutil /usr/local/bin/
+          ossutil --version
+
+      - name: Python OSS SDK インストール
+        run: pip install oss2
+
+      - name: GitHubファイル一覧・MD5取得
+        run: |
+          python3 << 'EOF'
+          import os, hashlib, json
+
+          data_dir = os.path.join(os.environ['GITHUB_WORKSPACE'], os.environ['DATA_PATH'])
+          files = {}
+
+          for root, dirs, filenames in os.walk(data_dir):
+              dirs.sort()
+              for filename in sorted(filenames):
+                  filepath = os.path.join(root, filename)
+                  rel_path = os.path.relpath(filepath, data_dir).replace('\\', '/')
+                  with open(filepath, 'rb') as f:
+                      md5 = hashlib.md5(f.read()).hexdigest()
+                  files[rel_path] = md5
+
+          with open('/tmp/github_files.json', 'w') as f:
+              json.dump(files, f, indent=2)
+
+          print(f"GitHubファイル数: {len(files)}件")
+          for path, md5 in files.items():
+              print(f"  {md5}  {path}")
+          EOF
+
+      - name: OSSファイル一覧・ETag取得
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          python3 << 'EOF'
+          import oss2, os, json
+
+          auth = oss2.Auth(os.environ['OSS_ACCESS_KEY_ID'], os.environ['OSS_ACCESS_KEY_SECRET'])
+          bucket = oss2.Bucket(auth, f"https://{os.environ['OSS_ENDPOINT']}", os.environ['OSS_BUCKET'])
+          prefix = os.environ['OSS_PREFIX']
+
+          files = {}
+          # ObjectIteratorで全ファイルを1回のAPI呼び出しで取得
+          for obj in oss2.ObjectIterator(bucket, prefix=prefix):
+              key = obj.key[len(prefix):]
+              if key:  # ディレクトリ自体（空文字）は除外
+                  files[key] = obj.etag.strip('"').lower()
+
+          with open('/tmp/oss_files.json', 'w') as f:
+              json.dump(files, f, indent=2)
+
+          print(f"OSSファイル数: {len(files)}件")
+          for path, etag in files.items():
+              print(f"  {etag}  {path}")
+          EOF
+
+      - name: 差分判定・同期実行
+        id: sync_result
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          python3 << 'EOF'
+          import json, os, subprocess, time
+
+          with open('/tmp/github_files.json') as f:
+              github_files = json.load(f)
+          with open('/tmp/oss_files.json') as f:
+              oss_files = json.load(f)
+
+          endpoint     = os.environ['OSS_ENDPOINT']
+          bucket       = os.environ['OSS_BUCKET']
+          access_key_id     = os.environ['OSS_ACCESS_KEY_ID']
+          access_key_secret = os.environ['OSS_ACCESS_KEY_SECRET']
+          data_dir = os.path.join(os.environ['GITHUB_WORKSPACE'], os.environ['DATA_PATH'])
+          prefix   = os.environ['OSS_PREFIX']
+
+          # 差分判定
+          to_add    = [p for p in github_files if p not in oss_files]
+          to_update = [p for p in github_files if p in oss_files and github_files[p] != oss_files[p]]
+          to_delete = [p for p in oss_files if p not in github_files]
+
+          print("=== 差分判定結果 ===")
+          print(f"新規追加: {len(to_add)}件")
+          for p in to_add:    print(f"  + {p}")
+          print(f"更新:     {len(to_update)}件")
+          for p in to_update: print(f"  ~ {p}")
+          print(f"削除:     {len(to_delete)}件")
+          for p in to_delete: print(f"  - {p}")
+
+          has_diff = bool(to_add or to_update or to_delete)
+
+          def write_output(key, value):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"{key}={value}\n")
+
+          if not has_diff:
+              print("\n差分なし：同期処理をスキップします")
+              write_output('has_diff',       'false')
+              write_output('add_count',      0)
+              write_output('update_count',   0)
+              write_output('delete_count',   0)
+              write_output('sync_duration',  0)
+          else:
+              def run_ossutil(*args):
+                  cmd = ['ossutil', *args,
+                         '--endpoint',          endpoint,
+                         '--access-key-id',     access_key_id,
+                         '--access-key-secret', access_key_secret]
+                  r = subprocess.run(cmd, capture_output=True, text=True)
+                  if r.returncode != 0:
+                      raise RuntimeError(f"ossutil失敗: {r.stderr}")
+
+              sync_start = time.time()
+
+              # 新規追加・更新（処理は同じ：上書きコピー）
+              for path in to_add + to_update:
+                  label    = '追加' if path in to_add else '更新'
+                  local    = os.path.join(data_dir, path)
+                  oss_path = f'oss://{bucket}/{prefix}{path}'
+                  print(f"{label}: {path}")
+                  run_ossutil('cp', local, oss_path, '-f')
+
+              # 削除
+              for path in to_delete:
+                  oss_path = f'oss://{bucket}/{prefix}{path}'
+                  print(f"削除: {path}")
+                  run_ossutil('rm', oss_path, '-f')
+
+              sync_duration = round(time.time() - sync_start, 2)
+              print(f"\n同期処理時間: {sync_duration}秒")
+
+              write_output('has_diff',      'true')
+              write_output('add_count',     len(to_add))
+              write_output('update_count',  len(to_update))
+              write_output('delete_count',  len(to_delete))
+              write_output('sync_duration', sync_duration)
+          EOF
+
+      - name: 終了時刻記録
+        id: end_time
+        if: always()
+        run: echo "end=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+      - name: 実行サマリー
+        if: always()
+        run: |
+          echo "### 同期結果サマリー" >> $GITHUB_STEP_SUMMARY
+          echo "| 項目 | 値 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期元 | GitHub リポジトリ /${{ env.DATA_PATH }}/ |" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期先 | oss://${{ secrets.OSS_BUCKET }}/${{ env.OSS_PREFIX }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 開始時刻 | ${{ steps.start_time.outputs.start }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 終了時刻 | ${{ steps.end_time.outputs.end }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 差分あり | ${{ steps.sync_result.outputs.has_diff }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 新規追加 | ${{ steps.sync_result.outputs.add_count }}件 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 更新 | ${{ steps.sync_result.outputs.update_count }}件 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 削除 | ${{ steps.sync_result.outputs.delete_count }}件 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 同期処理時間 | ${{ steps.sync_result.outputs.sync_duration }}秒 |" >> $GITHUB_STEP_SUMMARY
