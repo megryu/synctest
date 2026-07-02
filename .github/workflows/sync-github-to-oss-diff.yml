@@ -8,6 +8,9 @@ env:
   DATA_PATH: "data"           # 同期対象のGitHubディレクトリ
   OSS_PREFIX: "data/"         # 同期対象のOSSプレフィックス
 
+permissions:
+  contents: write  # ファイル一覧をリポジトリにpushするために必要
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -168,6 +171,25 @@ jobs:
               write_output('delete_count',  len(to_delete))
               write_output('sync_duration', sync_duration)
           EOF
+
+      - name: ファイル一覧をリポジトリに保存
+        if: always()
+        run: |
+          mkdir -p .sync
+          cp /tmp/github_files.json .sync/github-manifest.json
+          cp /tmp/oss_files.json .sync/oss-manifest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .sync/
+
+          # 差分がある場合のみコミット・プッシュ
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: ファイル一覧更新 ($(date '+%Y-%m-%d %H:%M UTC'))"
+            git push
+          else
+            echo "マニフェストに変更なし：スキップ"
+          fi
 
       - name: 終了時刻記録
         id: end_time
